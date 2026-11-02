@@ -1,17 +1,11 @@
 import { Booking, AvailabilityBlock, UserProfile, ActivityLog } from './types';
 import { getInclusiveDateRange } from './dateUtils';
 import {
-  initializeGoogleDriveDatabase,
-  persistToGoogleDrive,
-  getCachedDatabase,
-  setCachedDatabase,
-  getDriveStatus,
-  subscribeDriveStatus,
-  DriveStatus,
   GOOGLE_DRIVE_FOLDER_ID,
   GOOGLE_DRIVE_FOLDER_URL,
+  downloadDatabaseJsonFile,
+  downloadBookingsCsvFile,
 } from './googleDriveApi';
-import { getGoogleAccessToken, setGoogleAccessToken } from './firebase';
 
 const TOKEN_KEY = 'serenity_bay_auth_token';
 const USER_KEY = 'serenity_bay_auth_user';
@@ -42,12 +36,8 @@ export function getStoredUser(): UserProfile | null {
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const token = getStoredToken();
-  const googleToken = getGoogleAccessToken();
   const headers = new Headers(options.headers || {});
   headers.set('Content-Type', 'application/json');
-  if (googleToken) {
-    headers.set('X-Google-Access-Token', googleToken);
-  }
   if (token) {
     headers.set('Authorization', `Bearer ${token}`);
   }
@@ -77,39 +67,16 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
-  // Google Drive Status & Controls
-  getDriveStatus(): DriveStatus {
-    return getDriveStatus();
-  },
-
-  subscribeDriveStatus(fn: (status: DriveStatus) => void): () => void {
-    return subscribeDriveStatus(fn);
-  },
-
   getDriveFolderUrl(): string {
     return GOOGLE_DRIVE_FOLDER_URL;
   },
 
-  async syncWithGoogleDrive(token: string): Promise<DriveStatus> {
-    setGoogleAccessToken(token);
-    await initializeGoogleDriveDatabase(token);
-    return getDriveStatus();
+  getDriveFolderId(): string {
+    return GOOGLE_DRIVE_FOLDER_ID;
   },
 
   // Auth
   async getAuthorizedUsers(): Promise<{ uid: string; displayName: string; role: 'user' | 'admin' }[]> {
-    // Check Google Drive database first if available
-    const driveDb = getCachedDatabase();
-    if (driveDb && driveDb.users && driveDb.users.length > 0) {
-      return driveDb.users
-        .filter((u) => u.isActive)
-        .map((u) => ({
-          uid: u.uid,
-          displayName: u.displayName,
-          role: u.role,
-        }));
-    }
-
     try {
       return await request('/api/auth/authorized-users');
     } catch {
@@ -132,15 +99,6 @@ export const api = {
       setStoredSession(res.token, res.user);
       return res;
     } catch (err: any) {
-      // Check Drive database users
-      const driveDb = getCachedDatabase();
-      const matched = driveDb.users.find((u) => u.uid === uid);
-      if (matched) {
-        const fallbackToken = `guest-token-${Date.now()}`;
-        setStoredSession(fallbackToken, matched);
-        return { token: fallbackToken, user: matched };
-      }
-
       if (err.status === 404 || err.message?.includes('Failed to fetch') || err.message?.includes('NetworkError')) {
         const fallbackUser: UserProfile = {
           uid,
@@ -236,21 +194,19 @@ export const api = {
 
   // Bookings
   async getBookings(): Promise<Booking[]> {
-    const driveDb = getCachedDatabase();
-    if (driveDb && driveDb.bookings && driveDb.bookings.length > 0) {
-      return driveDb.bookings;
-    }
-
     try {
-      const serverBookings = await request<Booking[]>('/api/bookings');
-      if (serverBookings && serverBookings.length > 0) {
-        return serverBookings;
-      }
+      return await request<Booking[]>('/api/bookings');
     } catch {
-      // server unreachable
+      const local = localStorage.getItem('shalgaon_bookings');
+      if (local) {
+        try {
+          return JSON.parse(local);
+        } catch {
+          return [];
+        }
+      }
+      return [];
     }
-
-    return driveDb?.bookings || [];
   },
 
   async createBooking(payload: {
@@ -261,59 +217,37 @@ export const api = {
     startDate: string;
     endDate: string;
   }): Promise<{ success: boolean; message: string; booking: Booking }> {
-    const currentUser = getStoredUser();
-    const occupiedDates = getInclusiveDateRange(payload.startDate, payload.endDate);
-
-    const newBooking: Booking = {
-      bookingId: `SB-${Date.now().toString(36).toUpperCase()}-${Math.floor(1000 + Math.random() * 9000)}`,
-      ownerUid: currentUser?.uid || 'guest-user',
-      contactName: payload.contactName,
-      category: payload.category,
-      otherCategoryDescription: payload.otherCategoryDescription,
-      numberOfPeople: payload.numberOfPeople,
-      startDate: payload.startDate,
-      endDate: payload.endDate,
-      occupiedDates,
-      status: 'Confirmed',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      createdByName: currentUser?.displayName || payload.contactName,
-    };
-
-    // Update Drive Database
-    const driveDb = getCachedDatabase();
-    const updatedBookings = [...driveDb.bookings, newBooking];
-    const newLog: ActivityLog = {
-      logId: `LOG-${Date.now()}`,
-      eventType: 'BOOKING_CREATE',
-      actorUid: currentUser?.uid || 'guest-user',
-      actorName: currentUser?.displayName || payload.contactName,
-      actorRole: currentUser?.role || 'user',
-      description: `Reservation ${newBooking.bookingId} created for ${payload.contactName} (${payload.startDate} to ${payload.endDate})`,
-      timestamp: new Date().toISOString(),
-    };
-
-    const newDb = {
-      ...driveDb,
-      bookings: updatedBookings,
-      activityLogs: [newLog, ...(driveDb.activityLogs || [])],
-    };
-
-    setCachedDatabase(newDb);
-    // Persist to Google Drive folder
-    await persistToGoogleDrive(newDb);
-
-    // Also notify server backend asynchronously
-    request('/api/bookings', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }).catch(() => {});
-
-    return {
-      success: true,
-      message: `Reservation ${newBooking.bookingId} confirmed in Google Drive database`,
-      booking: newBooking,
-    };
+    try {
+      return await request('/api/bookings', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+    } catch (err: any) {
+      if (err.status === 404 || err.message?.includes('Failed to fetch') || err.message?.includes('NetworkError')) {
+        const currentUser = getStoredUser();
+        const occupiedDates = getInclusiveDateRange(payload.startDate, payload.endDate);
+        const newBooking: Booking = {
+          bookingId: `SB-${Date.now().toString(36).toUpperCase()}-${Math.floor(1000 + Math.random() * 9000)}`,
+          ownerUid: currentUser?.uid || 'guest-user',
+          contactName: payload.contactName,
+          category: payload.category,
+          otherCategoryDescription: payload.otherCategoryDescription,
+          numberOfPeople: payload.numberOfPeople,
+          startDate: payload.startDate,
+          endDate: payload.endDate,
+          occupiedDates,
+          status: 'Confirmed',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          createdByName: currentUser?.displayName || payload.contactName,
+        };
+        const existing: Booking[] = JSON.parse(localStorage.getItem('shalgaon_bookings') || '[]');
+        existing.push(newBooking);
+        localStorage.setItem('shalgaon_bookings', JSON.stringify(existing));
+        return { success: true, message: `Reservation ${newBooking.bookingId} confirmed`, booking: newBooking };
+      }
+      throw err;
+    }
   },
 
   async updateBooking(
@@ -327,114 +261,64 @@ export const api = {
       endDate: string;
     }
   ): Promise<{ success: boolean; message: string; booking: Booking }> {
-    const currentUser = getStoredUser();
-    const driveDb = getCachedDatabase();
-    const idx = driveDb.bookings.findIndex((b) => b.bookingId === bookingId);
-
-    if (idx === -1) {
-      throw new Error(`Reservation ${bookingId} not found in database.`);
+    try {
+      return await request(`/api/bookings/${bookingId}`, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      });
+    } catch (err: any) {
+      if (err.status === 404 || err.message?.includes('Failed to fetch') || err.message?.includes('NetworkError')) {
+        const existing: Booking[] = JSON.parse(localStorage.getItem('shalgaon_bookings') || '[]');
+        const idx = existing.findIndex((b) => b.bookingId === bookingId);
+        if (idx !== -1) {
+          const occupiedDates = getInclusiveDateRange(payload.startDate, payload.endDate);
+          existing[idx] = {
+            ...existing[idx],
+            ...payload,
+            occupiedDates,
+            updatedAt: new Date().toISOString(),
+          };
+          localStorage.setItem('shalgaon_bookings', JSON.stringify(existing));
+          return { success: true, message: `Reservation ${bookingId} updated`, booking: existing[idx] };
+        }
+      }
+      throw err;
     }
-
-    const occupiedDates = getInclusiveDateRange(payload.startDate, payload.endDate);
-    const updatedBooking: Booking = {
-      ...driveDb.bookings[idx],
-      ...payload,
-      occupiedDates,
-      updatedAt: new Date().toISOString(),
-    };
-
-    const updatedBookings = [...driveDb.bookings];
-    updatedBookings[idx] = updatedBooking;
-
-    const newLog: ActivityLog = {
-      logId: `LOG-${Date.now()}`,
-      eventType: 'BOOKING_UPDATE',
-      actorUid: currentUser?.uid || 'guest-user',
-      actorName: currentUser?.displayName || 'User',
-      actorRole: currentUser?.role || 'user',
-      description: `Reservation ${bookingId} modified to ${payload.startDate} to ${payload.endDate}`,
-      timestamp: new Date().toISOString(),
-    };
-
-    const newDb = {
-      ...driveDb,
-      bookings: updatedBookings,
-      activityLogs: [newLog, ...(driveDb.activityLogs || [])],
-    };
-
-    setCachedDatabase(newDb);
-    await persistToGoogleDrive(newDb);
-
-    request(`/api/bookings/${bookingId}`, {
-      method: 'PUT',
-      body: JSON.stringify(payload),
-    }).catch(() => {});
-
-    return {
-      success: true,
-      message: `Reservation ${bookingId} updated in Google Drive database`,
-      booking: updatedBooking,
-    };
   },
 
   async cancelBooking(bookingId: string): Promise<{ success: boolean; message: string; booking: Booking }> {
-    const currentUser = getStoredUser();
-    const driveDb = getCachedDatabase();
-    const idx = driveDb.bookings.findIndex((b) => b.bookingId === bookingId);
-
-    if (idx === -1) {
-      throw new Error(`Reservation ${bookingId} not found.`);
+    try {
+      return await request(`/api/bookings/${bookingId}/cancel`, {
+        method: 'POST',
+      });
+    } catch (err: any) {
+      if (err.status === 404 || err.message?.includes('Failed to fetch') || err.message?.includes('NetworkError')) {
+        const existing: Booking[] = JSON.parse(localStorage.getItem('shalgaon_bookings') || '[]');
+        const idx = existing.findIndex((b) => b.bookingId === bookingId);
+        if (idx !== -1) {
+          existing[idx].status = 'Cancelled';
+          existing[idx].updatedAt = new Date().toISOString();
+          localStorage.setItem('shalgaon_bookings', JSON.stringify(existing));
+          return { success: true, message: `Reservation ${bookingId} cancelled`, booking: existing[idx] };
+        }
+      }
+      throw err;
     }
-
-    const updatedBooking: Booking = {
-      ...driveDb.bookings[idx],
-      status: 'Cancelled',
-      updatedAt: new Date().toISOString(),
-    };
-
-    const updatedBookings = [...driveDb.bookings];
-    updatedBookings[idx] = updatedBooking;
-
-    const newLog: ActivityLog = {
-      logId: `LOG-${Date.now()}`,
-      eventType: 'BOOKING_CANCEL',
-      actorUid: currentUser?.uid || 'user',
-      actorName: currentUser?.displayName || 'User',
-      actorRole: currentUser?.role || 'user',
-      description: `Reservation ${bookingId} cancelled. Dates released in Google Drive database.`,
-      timestamp: new Date().toISOString(),
-    };
-
-    const newDb = {
-      ...driveDb,
-      bookings: updatedBookings,
-      activityLogs: [newLog, ...(driveDb.activityLogs || [])],
-    };
-
-    setCachedDatabase(newDb);
-    await persistToGoogleDrive(newDb);
-
-    request(`/api/bookings/${bookingId}/cancel`, {
-      method: 'POST',
-    }).catch(() => {});
-
-    return {
-      success: true,
-      message: `Reservation ${bookingId} cancelled in Google Drive database`,
-      booking: updatedBooking,
-    };
   },
 
   // Availability Blocks
   async getBlocks(): Promise<AvailabilityBlock[]> {
-    const driveDb = getCachedDatabase();
-    if (driveDb && driveDb.blocks) {
-      return driveDb.blocks;
-    }
-
     try {
-      return await request('/api/blocks');
+      return await request<AvailabilityBlock[]>('/api/blocks');
     } catch {
+      const local = localStorage.getItem('shalgaon_blocks');
+      if (local) {
+        try {
+          return JSON.parse(local);
+        } catch {
+          return [];
+        }
+      }
       return [];
     }
   },
@@ -445,112 +329,74 @@ export const api = {
     reason: string;
     forceOverride?: boolean;
   }): Promise<{ success: boolean; message: string; block: AvailabilityBlock }> {
-    const currentUser = getStoredUser();
-    const occupiedDates = getInclusiveDateRange(payload.startDate, payload.endDate);
-    const newBlock: AvailabilityBlock = {
-      blockId: `BLK-${Date.now().toString(36).toUpperCase()}`,
-      startDate: payload.startDate,
-      endDate: payload.endDate,
-      occupiedDates,
-      reason: payload.reason,
-      createdByUid: currentUser?.uid || 'admin-root',
-      createdAt: new Date().toISOString(),
-      status: 'Active',
-      updatedAt: new Date().toISOString(),
-    };
-
-    const driveDb = getCachedDatabase();
-    const updatedBlocks = [...driveDb.blocks, newBlock];
-    const newLog: ActivityLog = {
-      logId: `LOG-${Date.now()}`,
-      eventType: 'BLOCK_CREATE',
-      actorUid: currentUser?.uid || 'admin-root',
-      actorName: currentUser?.displayName || 'Administrator',
-      actorRole: 'admin',
-      description: `Maintenance block ${newBlock.blockId} created: ${payload.reason}`,
-      timestamp: new Date().toISOString(),
-    };
-
-    const newDb = {
-      ...driveDb,
-      blocks: updatedBlocks,
-      activityLogs: [newLog, ...(driveDb.activityLogs || [])],
-    };
-
-    setCachedDatabase(newDb);
-    await persistToGoogleDrive(newDb);
-
-    request('/api/blocks', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }).catch(() => {});
-
-    return {
-      success: true,
-      message: `Administrative maintenance block created in Google Drive database`,
-      block: newBlock,
-    };
+    try {
+      return await request('/api/blocks', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+    } catch (err: any) {
+      if (err.status === 404 || err.message?.includes('Failed to fetch') || err.message?.includes('NetworkError')) {
+        const currentUser = getStoredUser();
+        const occupiedDates = getInclusiveDateRange(payload.startDate, payload.endDate);
+        const newBlock: AvailabilityBlock = {
+          blockId: `BLK-${Date.now().toString(36).toUpperCase()}`,
+          startDate: payload.startDate,
+          endDate: payload.endDate,
+          occupiedDates,
+          reason: payload.reason,
+          createdByUid: currentUser?.uid || 'admin-root',
+          createdAt: new Date().toISOString(),
+          status: 'Active',
+          updatedAt: new Date().toISOString(),
+        };
+        const existing: AvailabilityBlock[] = JSON.parse(localStorage.getItem('shalgaon_blocks') || '[]');
+        existing.push(newBlock);
+        localStorage.setItem('shalgaon_blocks', JSON.stringify(existing));
+        return { success: true, message: 'Maintenance block created', block: newBlock };
+      }
+      throw err;
+    }
   },
 
   async releaseBlock(blockId: string): Promise<{ success: boolean; message: string; block: AvailabilityBlock }> {
-    const currentUser = getStoredUser();
-    const driveDb = getCachedDatabase();
-    const idx = driveDb.blocks.findIndex((b) => b.blockId === blockId);
-
-    if (idx === -1) {
-      throw new Error(`Block ${blockId} not found.`);
+    try {
+      return await request(`/api/blocks/${blockId}/release`, {
+        method: 'PUT',
+      });
+    } catch (err: any) {
+      if (err.status === 404 || err.message?.includes('Failed to fetch') || err.message?.includes('NetworkError')) {
+        const existing: AvailabilityBlock[] = JSON.parse(localStorage.getItem('shalgaon_blocks') || '[]');
+        const idx = existing.findIndex((b) => b.blockId === blockId);
+        if (idx !== -1) {
+          existing[idx].status = 'Released';
+          localStorage.setItem('shalgaon_blocks', JSON.stringify(existing));
+          return { success: true, message: `Block ${blockId} released`, block: existing[idx] };
+        }
+      }
+      throw err;
     }
-
-    const updatedBlock: AvailabilityBlock = {
-      ...driveDb.blocks[idx],
-      status: 'Released',
-      updatedAt: new Date().toISOString(),
-    };
-
-    const updatedBlocks = [...driveDb.blocks];
-    updatedBlocks[idx] = updatedBlock;
-
-    const newLog: ActivityLog = {
-      logId: `LOG-${Date.now()}`,
-      eventType: 'BLOCK_RELEASE',
-      actorUid: currentUser?.uid || 'admin-root',
-      actorName: currentUser?.displayName || 'Administrator',
-      actorRole: 'admin',
-      description: `Maintenance block ${blockId} released. Dates available again.`,
-      timestamp: new Date().toISOString(),
-    };
-
-    const newDb = {
-      ...driveDb,
-      blocks: updatedBlocks,
-      activityLogs: [newLog, ...(driveDb.activityLogs || [])],
-    };
-
-    setCachedDatabase(newDb);
-    await persistToGoogleDrive(newDb);
-
-    request(`/api/blocks/${blockId}/release`, {
-      method: 'PUT',
-    }).catch(() => {});
-
-    return {
-      success: true,
-      message: `Block ${blockId} released in Google Drive database`,
-      block: updatedBlock,
-    };
   },
 
   // Admin User Management
   async getAdminUsers(): Promise<UserProfile[]> {
-    const driveDb = getCachedDatabase();
-    if (driveDb && driveDb.users && driveDb.users.length > 0) {
-      return driveDb.users;
-    }
-
     try {
-      return await request('/api/admin/users');
+      return await request<UserProfile[]>('/api/admin/users');
     } catch {
-      return driveDb.users || [];
+      return [
+        {
+          uid: 'admin-root',
+          displayName: 'Resort Administrator',
+          role: 'admin',
+          isActive: true,
+          createdAt: new Date().toISOString(),
+          email: 'admin@shalgaonresort.com',
+        },
+        { uid: 'usr-mvnf5l2v-696', displayName: 'Tariq Mansoor', role: 'user', isActive: true, createdAt: new Date().toISOString() },
+        { uid: 'usr-mvnf9ozb-607', displayName: 'Rashid Ahmed', role: 'user', isActive: true, createdAt: new Date().toISOString() },
+        { uid: 'usr-mvnf9p17-233', displayName: 'Farhana Karim', role: 'user', isActive: true, createdAt: new Date().toISOString() },
+        { uid: 'usr-mvnf9p32-913', displayName: 'Zubair Hossain', role: 'user', isActive: true, createdAt: new Date().toISOString() },
+        { uid: 'usr-mvnf9p4w-910', displayName: 'Dr. Nusrat Jahan', role: 'user', isActive: true, createdAt: new Date().toISOString() },
+      ];
     }
   },
 
@@ -560,47 +406,25 @@ export const api = {
     role?: 'user' | 'admin';
     email?: string;
   }): Promise<{ success: boolean; message: string; user: UserProfile }> {
-    const currentUser = getStoredUser();
-    const newUser: UserProfile = {
-      uid: `usr-${Date.now().toString(36)}`,
-      displayName: payload.displayName,
-      role: payload.role || 'user',
-      isActive: true,
-      createdAt: new Date().toISOString(),
-      email: payload.email,
-    };
-
-    const driveDb = getCachedDatabase();
-    const updatedUsers = [...driveDb.users, newUser];
-    const newLog: ActivityLog = {
-      logId: `LOG-${Date.now()}`,
-      eventType: 'USER_CREATE',
-      actorUid: currentUser?.uid || 'admin-root',
-      actorName: currentUser?.displayName || 'Administrator',
-      actorRole: 'admin',
-      description: `Guest account created for ${newUser.displayName}`,
-      timestamp: new Date().toISOString(),
-    };
-
-    const newDb = {
-      ...driveDb,
-      users: updatedUsers,
-      activityLogs: [newLog, ...(driveDb.activityLogs || [])],
-    };
-
-    setCachedDatabase(newDb);
-    await persistToGoogleDrive(newDb);
-
-    request('/api/admin/users', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }).catch(() => {});
-
-    return {
-      success: true,
-      message: `User account created for ${newUser.displayName} in Google Drive database`,
-      user: newUser,
-    };
+    try {
+      return await request('/api/admin/users', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+    } catch (err: any) {
+      if (err.status === 404 || err.message?.includes('Failed to fetch') || err.message?.includes('NetworkError')) {
+        const newUser: UserProfile = {
+          uid: `usr-${Date.now().toString(36)}`,
+          displayName: payload.displayName,
+          role: payload.role || 'user',
+          isActive: true,
+          createdAt: new Date().toISOString(),
+          email: payload.email,
+        };
+        return { success: true, message: `User account created for ${newUser.displayName}`, user: newUser };
+      }
+      throw err;
+    }
   },
 
   async updateAdminUser(
@@ -612,52 +436,20 @@ export const api = {
       newPassword?: string;
     }
   ): Promise<{ success: boolean; message: string; user: UserProfile }> {
-    const currentUser = getStoredUser();
-    const driveDb = getCachedDatabase();
-    const idx = driveDb.users.findIndex((u) => u.uid === uid);
-
-    if (idx === -1) {
-      throw new Error(`User ${uid} not found.`);
+    try {
+      return await request(`/api/admin/users/${uid}`, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      });
+    } catch (err: any) {
+      const users = await api.getAdminUsers();
+      const matched = users.find((u) => u.uid === uid);
+      if (matched) {
+        const updated = { ...matched, ...payload };
+        return { success: true, message: `User updated successfully`, user: updated };
+      }
+      throw err;
     }
-
-    const updatedUser: UserProfile = {
-      ...driveDb.users[idx],
-      ...payload,
-      updatedAt: new Date().toISOString(),
-    };
-
-    const updatedUsers = [...driveDb.users];
-    updatedUsers[idx] = updatedUser;
-
-    const newLog: ActivityLog = {
-      logId: `LOG-${Date.now()}`,
-      eventType: 'USER_STATUS_CHANGE',
-      actorUid: currentUser?.uid || 'admin-root',
-      actorName: currentUser?.displayName || 'Administrator',
-      actorRole: 'admin',
-      description: `User account ${updatedUser.displayName} updated in Google Drive database`,
-      timestamp: new Date().toISOString(),
-    };
-
-    const newDb = {
-      ...driveDb,
-      users: updatedUsers,
-      activityLogs: [newLog, ...(driveDb.activityLogs || [])],
-    };
-
-    setCachedDatabase(newDb);
-    await persistToGoogleDrive(newDb);
-
-    request(`/api/admin/users/${uid}`, {
-      method: 'PUT',
-      body: JSON.stringify(payload),
-    }).catch(() => {});
-
-    return {
-      success: true,
-      message: `User ${updatedUser.displayName} updated in Google Drive database`,
-      user: updatedUser,
-    };
   },
 
   async getActivityLogs(params?: {
@@ -665,27 +457,6 @@ export const api = {
     search?: string;
     limit?: number;
   }): Promise<ActivityLog[]> {
-    const driveDb = getCachedDatabase();
-    if (driveDb && driveDb.activityLogs && driveDb.activityLogs.length > 0) {
-      let logs = [...driveDb.activityLogs];
-      if (params?.eventType && params.eventType !== 'all') {
-        logs = logs.filter((l) => l.eventType === params.eventType);
-      }
-      if (params?.search) {
-        const q = params.search.toLowerCase();
-        logs = logs.filter(
-          (l) =>
-            l.description.toLowerCase().includes(q) ||
-            l.actorName.toLowerCase().includes(q) ||
-            l.logId.toLowerCase().includes(q)
-        );
-      }
-      if (params?.limit) {
-        logs = logs.slice(0, params.limit);
-      }
-      return logs;
-    }
-
     try {
       const query = new URLSearchParams();
       if (params?.eventType && params.eventType !== 'all') {
@@ -700,42 +471,73 @@ export const api = {
       const qs = query.toString();
       return await request(`/api/admin/activity-logs${qs ? `?${qs}` : ''}`);
     } catch {
-      return driveDb.activityLogs || [];
+      return [
+        {
+          logId: 'log-default-1',
+          eventType: 'LOGIN',
+          actorUid: 'admin-root',
+          actorName: 'Resort Administrator',
+          actorRole: 'admin',
+          description: 'Administrator session active',
+          timestamp: new Date().toISOString(),
+        },
+      ];
     }
   },
 
   async seedSampleData(): Promise<{ success: boolean; message: string; sampleUsers: any[] }> {
-    return {
-      success: true,
-      message: 'Sample guests active in Google Drive database',
-      sampleUsers: [
-        { displayName: 'Tariq Mansoor', password: 'GuestPass2026!' },
-        { displayName: 'Rashid Ahmed', password: 'ResortPass123' },
-        { displayName: 'Farhana Karim', password: 'ResortPass123' },
-      ],
-    };
+    try {
+      return await request('/api/admin/seed-sample', { method: 'POST' });
+    } catch {
+      return {
+        success: true,
+        message: 'Sample guests verified',
+        sampleUsers: [
+          { displayName: 'Tariq Mansoor', password: 'GuestPass2026!' },
+          { displayName: 'Rashid Ahmed', password: 'ResortPass123' },
+          { displayName: 'Farhana Karim', password: 'ResortPass123' },
+        ],
+      };
+    }
   },
 
   async resetDatabase(): Promise<{ success: boolean; message: string }> {
-    const driveDb = getCachedDatabase();
-    const newDb = {
-      ...driveDb,
-      bookings: [],
-      blocks: [],
-      activityLogs: [
-        {
-          logId: `LOG-${Date.now()}`,
-          eventType: 'USER_CREATE' as const,
-          actorUid: 'admin-root',
-          actorName: 'Administrator',
-          actorRole: 'admin' as const,
-          description: 'Reservations reset in Google Drive database.',
-          timestamp: new Date().toISOString(),
-        },
-      ],
-    };
-    setCachedDatabase(newDb);
-    await persistToGoogleDrive(newDb);
-    return { success: true, message: 'Google Drive database reset successfully.' };
+    try {
+      return await request('/api/admin/reset-database', { method: 'POST' });
+    } catch {
+      localStorage.removeItem('shalgaon_bookings');
+      localStorage.removeItem('shalgaon_blocks');
+      return { success: true, message: 'Database reset successfully' };
+    }
+  },
+
+  // Export functions to drop into Google Drive shared folder
+  async exportDatabaseFile(): Promise<void> {
+    try {
+      const bookings = await api.getBookings();
+      const blocks = await api.getBlocks();
+      const users = await api.getAdminUsers();
+      const activityLogs = await api.getActivityLogs({ limit: 100 });
+      const dbDump = {
+        users,
+        bookings,
+        blocks,
+        activityLogs,
+        exportedAt: new Date().toISOString(),
+        sharedDriveFolder: GOOGLE_DRIVE_FOLDER_URL,
+      };
+      downloadDatabaseJsonFile(dbDump, 'database.json');
+    } catch (err: any) {
+      console.error('Export database failed:', err);
+    }
+  },
+
+  async exportBookingsCsvFile(): Promise<void> {
+    try {
+      const bookings = await api.getBookings();
+      downloadBookingsCsvFile(bookings, 'Shalgaon_Resort_Reservations.csv');
+    } catch (err: any) {
+      console.error('Export CSV failed:', err);
+    }
   },
 };

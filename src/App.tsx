@@ -5,14 +5,12 @@ import { CalendarView } from './components/CalendarView';
 import { BookingModal } from './components/BookingModal';
 import { BookingDetailsModal } from './components/BookingDetailsModal';
 import { CancelConfirmationModal } from './components/CancelConfirmationModal';
-import { DriveSyncModal } from './components/DriveSyncModal';
 import { MyBookingsView } from './components/MyBookingsView';
 import { AdminDashboard } from './components/AdminDashboard';
 import { Booking, AvailabilityBlock, UserProfile } from './lib/types';
-import { api, getStoredUser, clearStoredSession } from './lib/api';
-import { testConnection, initGoogleAuth, googleLogout } from './lib/firebase';
-import { DriveStatus } from './lib/googleDriveApi';
-import { CheckCircle2, AlertCircle, X, HardDrive } from 'lucide-react';
+import { api, getStoredUser } from './lib/api';
+import { testConnection } from './lib/firebase';
+import { CheckCircle2, AlertCircle, X } from 'lucide-react';
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(getStoredUser());
@@ -20,11 +18,9 @@ export default function App() {
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [blocks, setBlocks] = useState<AvailabilityBlock[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [driveStatus, setDriveStatus] = useState<DriveStatus>(api.getDriveStatus());
 
   // Modals state
   const [isBookingModalOpen, setIsBookingModalOpen] = useState<boolean>(false);
-  const [isDriveModalOpen, setIsDriveModalOpen] = useState<boolean>(false);
   const [selectedInitialDate, setSelectedInitialDate] = useState<string | undefined>();
   const [editingBooking, setEditingBooking] = useState<Booking | null>(null);
 
@@ -44,21 +40,6 @@ export default function App() {
   // Test Firebase connection on mount as requested by skill
   useEffect(() => {
     testConnection().catch(() => {});
-    const unsubDrive = api.subscribeDriveStatus(setDriveStatus);
-    const unsub = initGoogleAuth(
-      async (_user, token) => {
-        try {
-          await api.syncWithGoogleDrive(token);
-        } catch {
-          // ignore
-        }
-      },
-      () => {}
-    );
-    return () => {
-      unsub();
-      unsubDrive();
-    };
   }, []);
 
   // Fetch bookings and blocks
@@ -90,7 +71,6 @@ export default function App() {
 
   // Handle Logout
   const handleLogout = () => {
-    googleLogout().catch(() => {});
     api.logout();
     setCurrentUser(null);
     setCurrentTab('calendar');
@@ -186,26 +166,7 @@ export default function App() {
         onSelectTab={setCurrentTab}
         onLogout={handleLogout}
         myBookingsCount={myBookingsCount}
-        onOpenDriveModal={() => setIsDriveModalOpen(true)}
       />
-
-      {/* Google Drive Upload Advisory Banner if not yet connected */}
-      {!driveStatus.isConnected && (
-        <div className="bg-amber-950/70 border-b border-amber-800/80 px-4 py-2.5 text-amber-200 text-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 shadow-xs">
-          <div className="flex items-center gap-2">
-            <HardDrive className="w-4 h-4 text-amber-400 shrink-0" />
-            <span>
-              Google Drive Folder (<code className="font-mono bg-black/40 px-1.5 py-0.5 rounded text-amber-300">13_ZUlzz1QLq145OZ_93zOd29fcBCVew5</code>) is pending initial database upload.
-            </span>
-          </div>
-          <button
-            onClick={() => setIsDriveModalOpen(true)}
-            className="px-3.5 py-1 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-bold text-xs transition-colors cursor-pointer shrink-0 shadow-xs"
-          >
-            Upload Database to Drive Now
-          </button>
-        </div>
-      )}
 
       {/* Main App Content Area */}
       <main className="flex-1 pb-16">
@@ -251,7 +212,6 @@ export default function App() {
               setEditingBooking(null);
               setIsBookingModalOpen(true);
             }}
-            onOpenDriveModal={() => setIsDriveModalOpen(true)}
           />
         )}
       </main>
@@ -260,13 +220,6 @@ export default function App() {
       <footer className="bg-white border-t border-slate-200 py-6 text-center text-xs text-slate-400">
         <p>Shalgaon Private Resort &copy; 2026. All rights reserved. Private Booking &amp; Reservation System.</p>
       </footer>
-
-      {/* Drive Sync & Upload Modal */}
-      <DriveSyncModal
-        isOpen={isDriveModalOpen}
-        onClose={() => setIsDriveModalOpen(false)}
-        onSyncComplete={refreshData}
-      />
 
       {/* Booking Create/Edit Modal */}
       <BookingModal

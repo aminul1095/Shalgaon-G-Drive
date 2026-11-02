@@ -1,9 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { Palmtree, Eye, EyeOff, User, AlertCircle, Shield, CheckCircle2, HardDrive, ExternalLink, Loader2 } from 'lucide-react';
+import { Palmtree, Eye, EyeOff, User, AlertCircle, Shield, CheckCircle2, Loader2, Sparkles } from 'lucide-react';
 import { api } from '../lib/api';
 import { UserProfile } from '../lib/types';
-import { signInWithGoogle, getGoogleAccessToken } from '../lib/firebase';
-import { GOOGLE_DRIVE_FOLDER_ID, GOOGLE_DRIVE_FOLDER_URL } from '../lib/googleDriveApi';
 
 interface LoginScreenProps {
   onLoginSuccess: (user: UserProfile) => void;
@@ -15,7 +13,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
   const [password, setPassword] = useState<string>('');
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [isGoogleLoading, setIsGoogleLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
   // Admin access state
@@ -52,46 +49,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
     }
   };
 
-  const handleGoogleSignIn = async () => {
-    setError(null);
-    setIsGoogleLoading(true);
-    try {
-      const result = await signInWithGoogle();
-      if (!result) {
-        // User closed or dismissed the popup. Return cleanly without showing an error.
-        return;
-      }
-
-      // Sync and initialize Google Drive database in the user's folder
-      await api.syncWithGoogleDrive(result.accessToken);
-
-      // Construct user profile from Google Account
-      const userEmail = result.user.email || '';
-      const isAdmin = userEmail.includes('admin') || userEmail === 'aminulaffiliate@gmail.com';
-      const userProfile: UserProfile = {
-        uid: result.user.uid,
-        displayName: result.user.displayName || 'Resort Member',
-        email: userEmail,
-        role: isAdmin ? 'admin' : 'user',
-        isActive: true,
-        createdAt: new Date().toISOString(),
-      };
-
-      // Cache session in api
-      api.login(userProfile.uid, 'google-oauth-pass').catch(() => {});
-      localStorage.setItem('serenity_bay_auth_user', JSON.stringify(userProfile));
-      localStorage.setItem('serenity_bay_auth_token', `g-token-${Date.now()}`);
-
-      onLoginSuccess(userProfile);
-    } catch (err: any) {
-      if (err?.code !== 'auth/popup-closed-by-user' && err?.code !== 'auth/cancelled-popup-request') {
-        setError(err.message || 'Unable to connect to Google Drive. Please verify popup permissions.');
-      }
-    } finally {
-      setIsGoogleLoading(false);
-    }
-  };
-
   const handleGuestLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -109,10 +66,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
     setIsLoading(true);
     try {
       const res = await api.login(selectedUid, password);
-      const googleToken = getGoogleAccessToken();
-      if (googleToken) {
-        await api.syncWithGoogleDrive(googleToken).catch(() => {});
-      }
       onLoginSuccess(res.user);
     } catch (err: any) {
       setError(err.message || 'Invalid name and password combination. Please verify your credentials.');
@@ -135,10 +88,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
     try {
       try {
         const res = await api.adminLogin(adminPassword);
-        const googleToken = getGoogleAccessToken();
-        if (googleToken) {
-          await api.syncWithGoogleDrive(googleToken).catch(() => {});
-        }
         onLoginSuccess(res.user);
         return;
       } catch (loginErr: any) {
@@ -173,77 +122,11 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
         <p className="mt-2 text-xs text-slate-400">
           Exclusive, invitation-only luxury reservation management
         </p>
-
-        {/* Google Drive Database Banner */}
-        <div className="mt-4 mx-4 sm:mx-0 p-3 rounded-xl bg-emerald-950/40 border border-emerald-800/60 text-left flex items-start gap-3">
-          <HardDrive className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
-          <div className="text-xs text-slate-300">
-            <div className="font-semibold text-emerald-300 flex items-center gap-1.5">
-              <span>Google Drive Database Connected</span>
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-            </div>
-            <p className="text-slate-400 mt-0.5">
-              Reservations stored in folder: <code className="text-emerald-300 font-mono text-[11px]">{GOOGLE_DRIVE_FOLDER_ID}</code>
-            </p>
-            <a
-              href={GOOGLE_DRIVE_FOLDER_URL}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1 text-emerald-400 hover:text-emerald-300 font-medium mt-1 text-[11px] underline underline-offset-2"
-            >
-              <span>View Folder in Google Drive</span>
-              <ExternalLink className="w-3 h-3" />
-            </a>
-          </div>
-        </div>
       </div>
 
-      <div className="mt-6 sm:mx-auto sm:w-full sm:max-w-md px-4 sm:px-0">
+      <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md px-4 sm:px-0">
         <div className="bg-slate-900/90 backdrop-blur-xl py-8 px-6 sm:px-10 shadow-2xl rounded-2xl border border-slate-800">
           
-          {/* Sign in with Google Primary Button */}
-          <div className="mb-6">
-            <label className="block text-xs font-semibold text-slate-300 mb-2 text-center uppercase tracking-wider">
-              Instant Google Drive Access
-            </label>
-            <button
-              type="button"
-              onClick={handleGoogleSignIn}
-              disabled={isGoogleLoading}
-              className="gsi-material-button shadow-lg hover:shadow-emerald-500/10 cursor-pointer disabled:opacity-60"
-            >
-              <div className="gsi-material-button-state"></div>
-              <div className="gsi-material-button-content-wrapper">
-                <div className="gsi-material-button-icon">
-                  {isGoogleLoading ? (
-                    <Loader2 className="w-5 h-5 animate-spin text-slate-700" />
-                  ) : (
-                    <svg version="1.1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" style={{ display: 'block', width: '20px', height: '20px' }}>
-                      <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"></path>
-                      <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"></path>
-                      <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"></path>
-                      <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"></path>
-                      <path fill="none" d="M0 0h48v48H0z"></path>
-                    </svg>
-                  )}
-                </div>
-                <span className="gsi-material-button-contents">
-                  {isGoogleLoading ? 'Connecting to Google Drive...' : 'Sign in with Google'}
-                </span>
-              </div>
-            </button>
-            <p className="mt-2 text-[11px] text-center text-slate-400">
-              Directly syncs bookings and availability to Google Drive &amp; Sheets
-            </p>
-          </div>
-
-          <div className="relative my-6 flex items-center justify-center">
-            <div className="border-t border-slate-800 w-full"></div>
-            <span className="bg-slate-900 px-3 text-[11px] font-medium text-slate-500 uppercase tracking-widest absolute">
-              Or use resort credentials
-            </span>
-          </div>
-
           {/* Mode Switcher */}
           <div className="flex rounded-xl bg-slate-950/70 p-1 mb-6 border border-slate-800">
             <button
@@ -393,9 +276,10 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
             </form>
           )}
 
-          <div className="mt-5 pt-4 border-t border-slate-800/80 text-center">
-            <span className="text-[11px] text-slate-500">
-              Resort Database: Google Drive Folder <span className="font-mono text-slate-400">{GOOGLE_DRIVE_FOLDER_ID}</span>
+          <div className="mt-6 pt-4 border-t border-slate-800/80 text-center">
+            <span className="text-[11px] text-slate-500 flex items-center justify-center gap-1.5">
+              <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Independent standalone database &bull; Deploy anywhere</span>
             </span>
           </div>
 

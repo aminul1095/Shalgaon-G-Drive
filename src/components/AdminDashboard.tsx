@@ -30,12 +30,13 @@ import {
   HardDrive,
   ExternalLink,
   Table,
+  Database,
+  FileSpreadsheet,
 } from 'lucide-react';
 import { Booking, AvailabilityBlock, UserProfile, ActivityLog } from '../lib/types';
 import { formatDisplayDate, getTodayString } from '../lib/dateUtils';
 import { api } from '../lib/api';
-import { GOOGLE_DRIVE_FOLDER_ID, GOOGLE_DRIVE_FOLDER_URL, DriveStatus } from '../lib/googleDriveApi';
-import { getGoogleAccessToken, signInWithGoogle } from '../lib/firebase';
+import { GOOGLE_DRIVE_FOLDER_ID, GOOGLE_DRIVE_FOLDER_URL } from '../lib/googleDriveApi';
 
 interface AdminDashboardProps {
   currentUser: UserProfile;
@@ -46,7 +47,6 @@ interface AdminDashboardProps {
   onEditBooking: (booking: Booking) => void;
   onCancelBooking: (booking: Booking) => void;
   onOpenBookingModal: () => void;
-  onOpenDriveModal?: () => void;
 }
 
 type AdminSubTab = 'bookings' | 'users' | 'blocks' | 'history';
@@ -60,7 +60,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onEditBooking,
   onCancelBooking,
   onOpenBookingModal,
-  onOpenDriveModal,
 }) => {
   const [activeSubTab, setActiveSubTab] = useState<AdminSubTab>('bookings');
   const [adminUsers, setAdminUsers] = useState<UserProfile[]>([]);
@@ -98,37 +97,27 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [statusFilter, setStatusFilter] = useState<'all' | 'Confirmed' | 'Cancelled'>('all');
   const [categoryFilter, setCategoryFilter] = useState<string>('all');
 
-  // Google Drive state
-  const [driveStatus, setDriveStatus] = useState<DriveStatus>(api.getDriveStatus());
-  const [isSyncingDrive, setIsSyncingDrive] = useState<boolean>(false);
+  // Database Export state
+  const [isExporting, setIsExporting] = useState<boolean>(false);
 
-  useEffect(() => {
-    const unsubscribe = api.subscribeDriveStatus(setDriveStatus);
-    return unsubscribe;
-  }, []);
-
-  const handleSyncDrive = async () => {
-    setIsSyncingDrive(true);
-    setActionErrorMsg(null);
-    setActionSuccessMsg(null);
+  const handleExportDatabase = async () => {
+    setIsExporting(true);
     try {
-      let token = getGoogleAccessToken();
-      if (!token) {
-        const res = await signInWithGoogle();
-        token = res?.accessToken || null;
-      }
-      if (token) {
-        await api.syncWithGoogleDrive(token);
-        setActionSuccessMsg('Resort database and Google Sheet successfully synced with Google Drive!');
-        onRefreshData();
-        loadUsers();
-      }
-    } catch (err: any) {
-      if (err?.code !== 'auth/popup-closed-by-user' && err?.code !== 'auth/cancelled-popup-request') {
-        setActionErrorMsg(err.message || 'Failed to sync with Google Drive folder.');
-      }
+      await api.exportDatabaseFile();
+      setActionSuccessMsg('database.json exported! You can save or drop this file into your shared Google Drive directory.');
+    } catch {
+      setActionErrorMsg('Failed to export database.');
     } finally {
-      setIsSyncingDrive(false);
+      setIsExporting(false);
+    }
+  };
+
+  const handleExportCsv = async () => {
+    try {
+      await api.exportBookingsCsvFile();
+      setActionSuccessMsg('Reservations CSV spreadsheet exported! You can open in Excel or upload directly into the shared Google Drive directory.');
+    } catch {
+      setActionErrorMsg('Failed to export CSV.');
     }
   };
 
@@ -400,61 +389,52 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </div>
       )}
 
-      {/* Google Drive Database Status Panel */}
-      <div className={`rounded-2xl p-5 border shadow-lg text-white ${
-        driveStatus.isConnected
-          ? 'bg-gradient-to-r from-slate-900 via-slate-900 to-emerald-950/90 border-emerald-800/60'
-          : 'bg-gradient-to-r from-slate-900 via-slate-900 to-amber-950/90 border-amber-800/60'
-      }`}>
-        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+      {/* Standalone Database Storage & Shared Google Drive Directory */}
+      <div className="rounded-2xl p-5 border shadow-lg text-white bg-gradient-to-r from-slate-900 via-slate-900 to-emerald-950/90 border-emerald-800/60">
+        <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">
           <div className="flex items-start gap-3.5">
-            <div className={`w-11 h-11 rounded-xl border flex items-center justify-center shrink-0 mt-0.5 ${
-              driveStatus.isConnected
-                ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-400'
-                : 'bg-amber-500/20 border-amber-500/40 text-amber-400'
-            }`}>
-              <HardDrive className="w-6 h-6" />
+            <div className="w-11 h-11 rounded-xl border flex items-center justify-center shrink-0 mt-0.5 bg-emerald-500/20 border-emerald-500/40 text-emerald-400">
+              <Database className="w-6 h-6" />
             </div>
             <div>
               <div className="flex items-center gap-2">
                 <h2 className="text-base font-bold text-white">
-                  {driveStatus.isConnected ? 'Google Drive Database Synced' : 'Google Drive Database Pending Upload'}
+                  Independent Database &amp; Shared Drive Storage
                 </h2>
-                <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold border ${
-                  driveStatus.isConnected
-                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
-                    : 'bg-amber-500/20 text-amber-300 border-amber-500/30'
-                }`}>
-                  <span className={`w-1.5 h-1.5 rounded-full ${
-                    driveStatus.isConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'
-                  }`}></span>
-                  {driveStatus.isConnected ? 'Connected' : 'Upload Needed'}
+                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold border bg-emerald-500/20 text-emerald-300 border-emerald-500/30">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                  Active &bull; Standalone
                 </span>
               </div>
               <p className="text-xs text-slate-300 mt-1">
-                Primary Database: <code className="text-emerald-300 font-mono">database.json</code> &bull; Synced Spreadsheet: <code className="text-emerald-300 font-mono">Shalgaon_Resort_Reservations</code>
+                Database Store: <code className="text-emerald-300 font-mono">data/database.json</code> &bull; Zero third-party cloud DB lock-in. Portable across any hosting platform.
               </p>
               <p className="text-[11px] text-slate-400 mt-0.5 flex items-center gap-1.5 flex-wrap">
-                <span>Folder ID:</span>
+                <span>Linked Shared Drive Directory:</span>
                 <span className="font-mono text-emerald-300">{GOOGLE_DRIVE_FOLDER_ID}</span>
-                {driveStatus.lastSyncTime && (
-                  <span className="text-slate-500">&bull; Last synced: {driveStatus.lastSyncTime}</span>
-                )}
+                <span className="text-slate-500">&bull; Anyone with link can view/edit</span>
               </p>
             </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-2 shrink-0">
             <button
-              onClick={onOpenDriveModal || handleSyncDrive}
-              className={`px-4 py-2 rounded-xl text-xs font-bold shadow-md flex items-center gap-1.5 transition-all cursor-pointer ${
-                driveStatus.isConnected
-                  ? 'bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-emerald-700/60'
-                  : 'bg-gradient-to-r from-amber-600 to-amber-700 hover:from-amber-500 hover:to-amber-600 text-white'
-              }`}
+              onClick={handleExportDatabase}
+              disabled={isExporting}
+              className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-emerald-700/60 text-xs font-bold shadow-md flex items-center gap-1.5 transition-all cursor-pointer"
+              title="Download full JSON database snapshot to keep or place in Drive folder"
             >
-              <RefreshCw className={`w-3.5 h-3.5 ${isSyncingDrive ? 'animate-spin' : ''}`} />
-              <span>{driveStatus.isConnected ? 'Manage & Sync Drive' : 'Upload Database to Drive Now'}</span>
+              <Download className="w-3.5 h-3.5" />
+              <span>Download database.json</span>
+            </button>
+
+            <button
+              onClick={handleExportCsv}
+              className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-teal-300 border border-teal-700/60 text-xs font-bold shadow-md flex items-center gap-1.5 transition-all cursor-pointer"
+              title="Export all reservations into a spreadsheet CSV file"
+            >
+              <FileSpreadsheet className="w-3.5 h-3.5" />
+              <span>Export CSV</span>
             </button>
 
             <a
@@ -462,23 +442,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               target="_blank"
               rel="noopener noreferrer"
               className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-sm flex items-center gap-1.5 transition-colors"
+              title="Open Google Drive shared directory in new tab"
             >
-              <span>Open Drive Folder</span>
+              <span>Open Drive Directory</span>
               <ExternalLink className="w-3.5 h-3.5" />
             </a>
-
-            {driveStatus.sheetFileUrl && (
-              <a
-                href={driveStatus.sheetFileUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="px-3.5 py-2 rounded-xl bg-teal-700 hover:bg-teal-600 text-white text-xs font-semibold shadow-sm flex items-center gap-1.5 transition-colors"
-              >
-                <Table className="w-3.5 h-3.5" />
-                <span>View Google Sheet</span>
-                <ExternalLink className="w-3 h-3" />
-              </a>
-            )}
           </div>
         </div>
       </div>
