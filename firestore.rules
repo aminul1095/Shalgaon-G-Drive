@@ -1,0 +1,146 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Global default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isBootstrappedAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == 'aminulaffiliate@gmail.com' ||
+        (request.auth.token.keys().hasAll(['admin']) && request.auth.token.admin == true)
+      );
+    }
+
+    function isAdmin() {
+      return isBootstrappedAdmin() || (
+        isSignedIn() && (
+          exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+          (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+           get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin')
+        )
+      );
+    }
+
+    function isValidDateString(d) {
+      return d is string && d.size() == 10 && d.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$');
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'displayName', 'role', 'isActive', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'displayName', 'role', 'isActive', 'createdAt', 'updatedAt']) &&
+        data.uid is string && data.uid.size() > 0 && data.uid.size() <= 128 &&
+        data.displayName is string && data.displayName.size() > 0 && data.displayName.size() <= 100 &&
+        data.role in ['user', 'admin'] &&
+        data.isActive is bool;
+    }
+
+    function isValidBooking(data) {
+      return data.keys().hasAll(['bookingId', 'ownerUid', 'contactName', 'category', 'numberOfPeople', 'startDate', 'endDate', 'occupiedDates', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['bookingId', 'ownerUid', 'contactName', 'category', 'otherCategoryDescription', 'numberOfPeople', 'startDate', 'endDate', 'occupiedDates', 'status', 'createdAt', 'updatedAt']) &&
+        data.bookingId is string && data.bookingId.size() > 0 && data.bookingId.size() <= 128 &&
+        data.ownerUid is string && data.ownerUid.size() > 0 && data.ownerUid.size() <= 128 &&
+        data.contactName is string && data.contactName.size() > 0 && data.contactName.size() <= 100 &&
+        data.category in ['Family', 'Friends', 'Others'] &&
+        (!('otherCategoryDescription' in data) || (data.otherCategoryDescription is string && data.otherCategoryDescription.size() <= 200)) &&
+        data.numberOfPeople is number && data.numberOfPeople > 0 && data.numberOfPeople <= 200 &&
+        isValidDateString(data.startDate) &&
+        isValidDateString(data.endDate) &&
+        data.occupiedDates is list && data.occupiedDates.size() > 0 && data.occupiedDates.size() <= 366 &&
+        data.status in ['Confirmed', 'Cancelled'];
+    }
+
+    function isValidAvailabilityBlock(data) {
+      return data.keys().hasAll(['blockId', 'startDate', 'endDate', 'occupiedDates', 'reason', 'createdByUid', 'createdAt', 'status']) &&
+        data.keys().hasOnly(['blockId', 'startDate', 'endDate', 'occupiedDates', 'reason', 'createdByUid', 'createdAt', 'status', 'updatedAt']) &&
+        data.blockId is string && data.blockId.size() > 0 && data.blockId.size() <= 128 &&
+        isValidDateString(data.startDate) &&
+        isValidDateString(data.endDate) &&
+        data.occupiedDates is list && data.occupiedDates.size() > 0 && data.occupiedDates.size() <= 366 &&
+        data.reason is string && data.reason.size() > 0 && data.reason.size() <= 300 &&
+        data.createdByUid is string && data.createdByUid.size() > 0 && data.createdByUid.size() <= 128 &&
+        data.status in ['Active', 'Released'];
+    }
+
+    // Users Collection
+    match /users/{userId} {
+      allow get, list: if isSignedIn();
+      allow create: if isValidId(userId) && isValidUser(incoming()) && (
+        isAdmin() || (request.auth.uid == userId && incoming().role == 'user')
+      );
+      allow update: if isValidId(userId) && isValidUser(incoming()) && (
+        isAdmin() || (
+          request.auth.uid == userId && 
+          incoming().role == existing().role && // Users cannot escalate own role
+          incoming().uid == existing().uid
+        )
+      );
+      allow delete: if isValidId(userId) && isAdmin();
+    }
+
+    // Admins Collection
+    match /admins/{adminId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // Bookings Collection
+    match /bookings/{bookingId} {
+      allow get, list: if isSignedIn();
+      
+      allow create: if isValidId(bookingId) && 
+        isValidBooking(incoming()) &&
+        (isAdmin() || (incoming().ownerUid == request.auth.uid && incoming().status == 'Confirmed'));
+
+      allow update: if isValidId(bookingId) &&
+        isValidBooking(incoming()) && (
+          isAdmin() || (
+            // Owner can edit or cancel if currently Confirmed
+            existing().ownerUid == request.auth.uid &&
+            incoming().ownerUid == existing().ownerUid &&
+            incoming().bookingId == existing().bookingId &&
+            incoming().createdAt == existing().createdAt &&
+            existing().status == 'Confirmed' &&
+            (
+              // Action: Edit details
+              (incoming().status == 'Confirmed' && incoming().diff(existing()).affectedKeys().hasOnly(['contactName', 'category', 'otherCategoryDescription', 'numberOfPeople', 'startDate', 'endDate', 'occupiedDates', 'updatedAt'])) ||
+              // Action: Cancel reservation
+              (incoming().status == 'Cancelled' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+            )
+          )
+        );
+
+      allow delete: if isValidId(bookingId) && isAdmin();
+    }
+
+    // Availability Blocks Collection
+    match /availabilityBlocks/{blockId} {
+      allow get, list: if isSignedIn();
+      allow create, update, delete: if isValidId(blockId) && isValidAvailabilityBlock(incoming()) && isAdmin();
+    }
+
+    // Activity Logs Collection (Admin Audit Trail)
+    match /activityLogs/{logId} {
+      allow read, write: if isValidId(logId) && isAdmin();
+    }
+  }
+}

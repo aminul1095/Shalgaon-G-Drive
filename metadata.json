@@ -1,0 +1,8 @@
+{
+  "name": "Remix Serenity Bay Private Resort - Booking \u0026 Reservation Manager",
+  "description": "Exclusive private resort reservation management system featuring real-time availability calendar, multi-day booking validation, user authentication, and administrator controls.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

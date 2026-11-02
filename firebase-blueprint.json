@@ -1,0 +1,101 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Authorized user account for resort booking system",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Unique user ID" },
+        "displayName": { "type": "string", "description": "Full name of the authorized user" },
+        "role": { "type": "string", "enum": ["user", "admin"], "description": "Access control role" },
+        "isActive": { "type": "boolean", "description": "Whether the user account is active" },
+        "createdAt": { "type": "string", "description": "ISO timestamp of account creation" }
+      },
+      "required": ["uid", "displayName", "role", "isActive", "createdAt"]
+    },
+    "Booking": {
+      "title": "Booking",
+      "description": "Reservation record for the private resort",
+      "type": "object",
+      "properties": {
+        "bookingId": { "type": "string", "description": "Unique booking identifier" },
+        "ownerUid": { "type": "string", "description": "UID of the user who owns the reservation" },
+        "contactName": { "type": "string", "description": "Primary contact name for the reservation" },
+        "category": { "type": "string", "enum": ["Family", "Friends", "Others"], "description": "Category of guests" },
+        "otherCategoryDescription": { "type": "string", "description": "Optional details if category is Others" },
+        "numberOfPeople": { "type": "number", "description": "Positive integer count of guests" },
+        "startDate": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "description": "Booking start date (YYYY-MM-DD)" },
+        "endDate": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "description": "Booking end date (YYYY-MM-DD)" },
+        "occupiedDates": { "type": "array", "description": "Inclusive list of booked YYYY-MM-DD date strings" },
+        "status": { "type": "string", "enum": ["Confirmed", "Cancelled"], "description": "Booking status" },
+        "createdAt": { "type": "string", "description": "Creation timestamp" },
+        "updatedAt": { "type": "string", "description": "Last modification timestamp" }
+      },
+      "required": ["bookingId", "ownerUid", "contactName", "category", "numberOfPeople", "startDate", "endDate", "occupiedDates", "status", "createdAt", "updatedAt"]
+    },
+    "AvailabilityBlock": {
+      "title": "AvailabilityBlock",
+      "description": "Administrative date blockage for maintenance or resort events",
+      "type": "object",
+      "properties": {
+        "blockId": { "type": "string", "description": "Unique block identifier" },
+        "startDate": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "description": "Block start date (YYYY-MM-DD)" },
+        "endDate": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "description": "Block end date (YYYY-MM-DD)" },
+        "occupiedDates": { "type": "array", "description": "Inclusive list of blocked YYYY-MM-DD date strings" },
+        "reason": { "type": "string", "description": "Reason for administrative block" },
+        "createdByUid": { "type": "string", "description": "UID of the administrator" },
+        "createdAt": { "type": "string", "description": "Creation timestamp" },
+        "status": { "type": "string", "enum": ["Active", "Released"], "description": "Block status" }
+      },
+      "required": ["blockId", "startDate", "endDate", "occupiedDates", "reason", "createdByUid", "createdAt", "status"]
+    },
+    "ActivityLog": {
+      "title": "ActivityLog",
+      "description": "Audit trail log tracking significant changes including logins, booking updates, and administrative blocks",
+      "type": "object",
+      "properties": {
+        "logId": { "type": "string", "description": "Unique activity log entry identifier" },
+        "eventType": {
+          "type": "string",
+          "enum": [
+            "LOGIN",
+            "BOOKING_CREATE",
+            "BOOKING_UPDATE",
+            "BOOKING_CANCEL",
+            "BLOCK_CREATE",
+            "BLOCK_RELEASE",
+            "USER_CREATE",
+            "USER_STATUS_CHANGE",
+            "USER_PASSWORD_RESET"
+          ],
+          "description": "Category of audit event"
+        },
+        "actorUid": { "type": "string", "description": "UID of user who performed the action" },
+        "actorName": { "type": "string", "description": "Display name of user" },
+        "actorRole": { "type": "string", "enum": ["user", "admin"], "description": "User role" },
+        "description": { "type": "string", "description": "Human-readable summary of the activity" },
+        "details": { "type": "object", "description": "Metadata context for the event" },
+        "timestamp": { "type": "string", "description": "ISO timestamp of event occurrence" }
+      },
+      "required": ["logId", "eventType", "actorUid", "actorName", "actorRole", "description", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Authorized user profiles"
+    },
+    "/bookings/{bookingId}": {
+      "schema": "Booking",
+      "description": "Resort reservations"
+    },
+    "/availabilityBlocks/{blockId}": {
+      "schema": "AvailabilityBlock",
+      "description": "Administrative maintenance blocks"
+    },
+    "/activityLogs/{logId}": {
+      "schema": "ActivityLog",
+      "description": "System and administrative activity audit log"
+    }
+  }
+}
